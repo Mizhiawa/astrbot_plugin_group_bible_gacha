@@ -530,7 +530,7 @@ class GroupBibleGachaPlugin(Star):
         info = "\n─────────────\n"
         if meta:
             who = meta.get("sender_name") or meta.get("sender_id") or "佚名"
-            info += f"📖 圣经出自：{who}"
+            info += f"📖 出自：{who}"
             if used_source == "essence" and meta.get("operator_name"):
                 info += f"　✍️ 加精：{meta['operator_name']}"
             if meta.get("time"):
