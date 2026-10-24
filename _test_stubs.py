@@ -286,7 +286,7 @@ def test_render_draw():
     assert "张三" in joined and "李四" in joined
     chain = plugin._render_draw("pool", [Plain("x")], {"sender_id": "1", "sender_name": "王五", "operator_name": "", "time": 0, "id": 7})
     texts = [c.text for c in chain if isinstance(c, Plain)]
-    assert any("#7" in t for t in texts)
+    assert not any("#7" in t for t in texts)  # 抽卡展示不带编号
     print("test_render_draw OK")
 
 

@@ -571,8 +571,6 @@ class GroupBibleGachaPlugin(Star):
                 info += f"　✍️ 加精：{meta['operator_name']}"
             if meta.get("time"):
                 info += f"\n🕒 {time.strftime('%Y-%m-%d %H:%M', time.localtime(meta['time']))}"
-            if used_source == "pool" and meta.get("id") is not None:
-                info += f"\n📌 圣经池编号 #{meta['id']}"
         chain.append(Plain(info))
         return chain
 
