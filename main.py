@@ -1,9 +1,9 @@
 """群圣经 · 抽卡插件。
 
 「/抽卡」从群精华消息与圣经池（群友投稿）中随机抽取一条发送展现；
-群友可通过「/投稿」把文字或图片投进圣经池，管理员审核后入库；
-被戳一戳时随机回敬一条圣经。支持分群开关管理与 SU（AstrBot 管理员）
-审核、导入、重置等管理指令。
+群友可通过「/投稿」把文字或图片直接投进圣经池（无需审核，自动查重）；
+被戳一戳时随机回敬一条圣经。支持群聊白名单（留空全部生效）、
+分群开关管理与 SU（AstrBot 管理员）导入、重置等管理指令。
 
 仅依赖 AstrBot 自带能力（OneBot v11 / aiocqhttp + NapCat），无第三方依赖。
 """
@@ -45,8 +45,6 @@ MAX_TEXT_LEN = 4000
 DRAW_TEXT_LIMIT = 2500
 # 列表预览的截断长度
 PREVIEW_LEN = 60
-# 审核列表一次最多展示条数
-REVIEW_LIST_LIMIT = 20
 # 冷却记录膨胀后的清理阈值
 COOLDOWN_GC_SIZE = 4096
 # 一次导入精华的条数上限
@@ -105,7 +103,7 @@ class GroupBibleGachaPlugin(Star):
     """群圣经 · 抽卡
 
     - /抽卡：从群精华消息 / 圣经池随机抽一条发送
-    - /投稿：把文字或图片投进本群圣经池（管理员审核后入库）
+    - /投稿：把文字或图片直接投进本群圣经池（自动查重）
     - 戳一戳机器人：随机回敬一条圣经
     - /圣经帮助：查看全部指令
     """
@@ -125,14 +123,13 @@ class GroupBibleGachaPlugin(Star):
             logger.warning(f"[群圣经] 图片目录创建失败：{e}")
 
         self._pool_file = self._data_dir / "pool.json"
-        self._pending_file = self._data_dir / "pending.json"
         self._settings_file = self._data_dir / "settings.json"
         # {"groups": {群号: {"next_id": int, "entries": [entry...]}}}
         self._pool: dict = self._load_json(self._pool_file, {"groups": {}})
-        # 待审核投稿，结构与 pool 相同
-        self._pending: dict = self._load_json(self._pending_file, {"groups": {}})
         # {群号: {"gacha": bool, "submit": bool, "poke": bool}}
         self._settings: dict = self._load_json(self._settings_file, {})
+        # 旧版本待审核数据直接转入圣经池（审核系统已移除）
+        self._migrate_legacy_pending()
 
         self._store_lock = asyncio.Lock()
         # 冷却记录：(群号, QQ) / 群号 -> 上次时间戳
@@ -214,6 +211,31 @@ class GroupBibleGachaPlugin(Star):
             except OSError as e:
                 logger.warning(f"[群圣经] 删除图片失败 {name}：{e}")
 
+    def _migrate_legacy_pending(self) -> None:
+        """旧版本的待审核数据（pending.json）直接转入圣经池后移除。"""
+        if not self._data_dir.exists():
+            return
+        legacy = self._data_dir / "pending.json"
+        if not legacy.is_file():
+            return
+        data = self._load_json(legacy, {"groups": {}})
+        migrated = 0
+        try:
+            for gid, state in data.get("groups", {}).items():
+                pool_state = self._group_state(self._pool, str(gid))
+                for entry in state.get("entries", []):
+                    entry["id"] = pool_state["next_id"]
+                    pool_state["next_id"] += 1
+                    pool_state["entries"].append(entry)
+                    migrated += 1
+                self._trim_pool(pool_state)
+            if migrated:
+                self._dump_json_sync(self._pool_file, self._pool)
+                logger.info(f"[群圣经] 已将旧版待审核投稿 {migrated} 条直接转入圣经池。")
+            legacy.unlink()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[群圣经] 迁移旧版待审核数据失败（不影响使用）：{e}")
+
     # ----------------------------------------------------------- 群与权限
 
     def _gid(self, event: AstrMessageEvent) -> str:
@@ -243,6 +265,20 @@ class GroupBibleGachaPlugin(Star):
         default = GROUP_DEFAULTS[key]
         value = self._settings.get(gid, {}).get(key, default)
         return bool(value)
+
+    def _whitelisted(self, gid: str) -> bool:
+        """群聊白名单：配置留空则所有群生效；私聊不受白名单限制。
+
+        不在白名单内的群会静默忽略本插件的一切指令与戳一戳。
+        """
+        whitelist = [
+            str(g).strip()
+            for g in self._cfg_list("group_whitelist", [])
+            if str(g).strip()
+        ]
+        if not whitelist or not gid:
+            return True
+        return gid in whitelist
 
     # ------------------------------------------------------------- 冷却控制
 
@@ -622,6 +658,8 @@ class GroupBibleGachaPlugin(Star):
         if not gid:
             yield event.plain_result("圣经抽卡请在群聊中使用~")
             return
+        if not self._whitelisted(gid):
+            return
         if not self._setting(gid, "gacha"):
             yield event.plain_result("本群已关闭圣经抽卡（管理员可用 /圣经开关 抽卡 开 启用）")
             return
@@ -666,6 +704,8 @@ class GroupBibleGachaPlugin(Star):
         gid = self._gid(event)
         if not gid:
             yield event.plain_result("圣经投稿请在群聊中使用~")
+            return
+        if not self._whitelisted(gid):
             return
         if not self._setting(gid, "submit"):
             yield event.plain_result("本群已关闭圣经投稿（管理员可用 /圣经开关 投稿 开 启用）")
@@ -741,15 +781,23 @@ class GroupBibleGachaPlugin(Star):
             "source": "submit",
             "key": self._entry_key(event.get_sender_id(), text, len(saved)),
         }
+        duplicate = False
         async with self._store_lock:
-            state = self._group_state(self._pending, gid)
-            entry["id"] = state["next_id"]
-            state["next_id"] += 1
-            state["entries"].append(entry)
-            await asyncio.to_thread(self._dump_json_sync, self._pending_file, self._pending)
+            state = self._group_state(self._pool, gid)
+            if any(e.get("key") == entry["key"] for e in state["entries"]):
+                duplicate = True
+            else:
+                entry["id"] = state["next_id"]
+                state["next_id"] += 1
+                state["entries"].append(entry)
+                self._trim_pool(state)
+                await asyncio.to_thread(self._dump_json_sync, self._pool_file, self._pool)
+        if duplicate:
+            yield event.plain_result("这条圣经已经在池子里啦，换个新鲜的再投~")
+            return
 
         yield event.plain_result(
-            f"✅ 投稿成功！圣经编号 #{entry['id']}，等待管理员 /圣经审核 后入库~"
+            f"✅ 投稿成功！已收入圣经池（编号 #{entry['id']}），/抽卡 试试手气吧~"
         )
 
     @filter.command("圣经池")
@@ -760,11 +808,12 @@ class GroupBibleGachaPlugin(Star):
         if not gid:
             yield event.plain_result("请在群聊中查看圣经池~")
             return
+        if not self._whitelisted(gid):
+            return
         state = self._group_state(self._pool, gid)
-        pending_state = self._group_state(self._pending, gid)
         entries = state["entries"]
         lines = [
-            f"📚 本群圣经池共 {len(entries)} 条（待审核 {len(pending_state['entries'])} 条）",
+            f"📚 本群圣经池共 {len(entries)} 条",
         ]
         if entries:
             lines.append("最近入库的几条：")
@@ -784,106 +833,23 @@ class GroupBibleGachaPlugin(Star):
     @filter.command("圣经预览")
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     async def preview_entry(self, event: AstrMessageEvent):
-        """预览某条投稿/圣经（圣经预览 编号）"""
+        """预览圣经池某条（圣经预览 编号）"""
         gid = self._gid(event)
         match = re.search(r"\d+", re.sub(r"^圣经预览\s*", "", event.get_message_str().strip()))
         if not gid or not match:
-            yield event.plain_result("用法：/圣经预览 编号（可预览待审核或已入库的圣经）")
+            yield event.plain_result("用法：/圣经预览 编号（预览圣经池里的条目）")
             return
-        entry = self._find_entry(self._pending, gid, int(match.group()))
-        where = "待审核投稿"
-        if entry is None:
-            entry = self._find_entry(self._pool, gid, int(match.group()))
-            where = "圣经池"
-        if entry is None:
-            yield event.plain_result(f"没找到编号 #{match.group()} 的条目。")
+        if not self._whitelisted(gid):
             return
-        chain = [Plain(f"🔍 {where} #{entry['id']}（投稿人：{entry.get('sender_name', '')}）：\n")]
+        entry = self._find_entry(self._pool, gid, int(match.group()))
+        if entry is None:
+            yield event.plain_result(f"圣经池里没有编号 #{match.group()} 的条目。")
+            return
+        chain = [Plain(f"🔍 圣经池 #{entry['id']}（{entry.get('sender_name', '')}）：\n")]
         chain.extend(self._pool_components(entry))
         yield event.chain_result(chain)
 
     # ================================================================ 管理指令
-
-    @filter.command("圣经审核")
-    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    async def review_list(self, event: AstrMessageEvent):
-        """列出本群待审核投稿（群管理员/AstrBot 管理员）"""
-        gid = self._gid(event)
-        if not gid:
-            yield event.plain_result("请在群聊中使用审核指令~")
-            return
-        if not self._is_moderator(event):
-            yield event.plain_result("该指令需要群管理员或 AstrBot 管理员权限。")
-            return
-        entries = self._group_state(self._pending, gid)["entries"]
-        if not entries:
-            yield event.plain_result("本群暂无待审核投稿。")
-            return
-        lines = [f"📋 待审核投稿共 {len(entries)} 条："]
-        for entry in entries[:REVIEW_LIST_LIMIT]:
-            preview = entry.get("text", "").strip()[:PREVIEW_LEN]
-            if not preview:
-                marks = []
-                if entry.get("images"):
-                    marks.append(f"图片x{len(entry['images'])}")
-                preview = " ".join(marks) or "[空]"
-            lines.append(f"#{entry['id']} {preview} —— {entry.get('sender_name', '')}")
-        if len(entries) > REVIEW_LIST_LIMIT:
-            lines.append(f"……其余 {len(entries) - REVIEW_LIST_LIMIT} 条略")
-        lines.append("通过：/圣经通过 编号（多个空格隔开，或「全部」）")
-        yield event.plain_result("\n".join(lines))
-
-    @filter.command("圣经通过")
-    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    async def approve(self, event: AstrMessageEvent):
-        """通过投稿：/圣经通过 编号... 或 /圣经通过 全部"""
-        gid = self._gid(event)
-        if not gid:
-            yield event.plain_result("请在群聊中使用审核指令~")
-            return
-        if not self._is_moderator(event):
-            yield event.plain_result("该指令需要群管理员或 AstrBot 管理员权限。")
-            return
-        ids = self._parse_ids(event.get_message_str())
-        if ids is False:
-            yield event.plain_result("用法：/圣经通过 编号（多个空格隔开，或「全部」）")
-            return
-        async with self._store_lock:
-            moved = self._move_entries(self._pending, self._pool, gid, ids)
-            await asyncio.to_thread(self._dump_json_sync, self._pending_file, self._pending)
-            await asyncio.to_thread(self._dump_json_sync, self._pool_file, self._pool)
-        if moved:
-            detail = "、".join(f"#{old}→#{new}" for old, new in moved)
-            yield event.plain_result(
-                f"✅ 已通过 {detail}，收入圣经池！"
-                f"当前池共 {len(self._group_state(self._pool, gid)['entries'])} 条。"
-            )
-        else:
-            yield event.plain_result("没有匹配的待审核投稿。")
-
-    @filter.command("圣经拒绝")
-    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
-    async def reject(self, event: AstrMessageEvent):
-        """拒绝投稿：/圣经拒绝 编号... 或 /圣经拒绝 全部"""
-        gid = self._gid(event)
-        if not gid:
-            yield event.plain_result("请在群聊中使用审核指令~")
-            return
-        if not self._is_moderator(event):
-            yield event.plain_result("该指令需要群管理员或 AstrBot 管理员权限。")
-            return
-        ids = self._parse_ids(event.get_message_str())
-        if ids is False:
-            yield event.plain_result("用法：/圣经拒绝 编号（多个空格隔开，或「全部」）")
-            return
-        async with self._store_lock:
-            removed = self._remove_entries(self._pending, gid, ids)
-            await asyncio.to_thread(self._dump_json_sync, self._pending_file, self._pending)
-        if removed:
-            ids_text = "全部" if ids is None else "、".join(f"#{i}" for i in removed)
-            yield event.plain_result(f"🗑️ 已拒绝并清理 {ids_text}。")
-        else:
-            yield event.plain_result("没有匹配的待审核投稿。")
 
     @filter.command("圣经移除")
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
@@ -892,6 +858,8 @@ class GroupBibleGachaPlugin(Star):
         gid = self._gid(event)
         if not gid:
             yield event.plain_result("请在群聊中使用管理指令~")
+            return
+        if not self._whitelisted(gid):
             return
         if not self._is_moderator(event):
             yield event.plain_result("该指令需要群管理员或 AstrBot 管理员权限。")
@@ -915,6 +883,8 @@ class GroupBibleGachaPlugin(Star):
         gid = self._gid(event)
         if not gid:
             yield event.plain_result("请在群聊中使用管理指令~")
+            return
+        if not self._whitelisted(gid):
             return
         if not event.is_admin():
             yield event.plain_result("导入精华仅限 AstrBot 管理员（SU）使用。")
@@ -993,38 +963,34 @@ class GroupBibleGachaPlugin(Star):
     @filter.command("圣经重置")
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     async def reset_pool(self, event: AstrMessageEvent):
-        """清空本群圣经池与待审核（仅 AstrBot 管理员）：/圣经重置 确认"""
+        """清空本群圣经池（仅 AstrBot 管理员）：/圣经重置 确认"""
         gid = self._gid(event)
         if not gid:
             yield event.plain_result("请在群聊中使用管理指令~")
+            return
+        if not self._whitelisted(gid):
             return
         if not event.is_admin():
             yield event.plain_result("重置仅限 AstrBot 管理员（SU）使用。")
             return
         if "确认" not in event.get_message_str():
             state = self._group_state(self._pool, gid)
-            pending_state = self._group_state(self._pending, gid)
             yield event.plain_result(
-                f"⚠️ 将清空本群圣经池 {len(state['entries'])} 条与待审核 "
-                f"{len(pending_state['entries'])} 条，且不可恢复。\n"
+                f"⚠️ 将清空本群圣经池 {len(state['entries'])} 条与分群设置，且不可恢复。\n"
                 f"确认请发：/圣经重置 确认",
             )
             return
         async with self._store_lock:
-            for state in (
-                self._group_state(self._pool, gid),
-                self._group_state(self._pending, gid),
-            ):
-                for entry in state["entries"]:
-                    self._delete_images(entry.get("images") or [])
-                state["entries"] = []
-                state["next_id"] = 1
+            state = self._group_state(self._pool, gid)
+            for entry in state["entries"]:
+                self._delete_images(entry.get("images") or [])
+            state["entries"] = []
+            state["next_id"] = 1
             self._settings.pop(gid, None)
             await asyncio.to_thread(self._dump_json_sync, self._pool_file, self._pool)
-            await asyncio.to_thread(self._dump_json_sync, self._pending_file, self._pending)
             await asyncio.to_thread(self._dump_json_sync, self._settings_file, self._settings)
         self._essence_cache.pop(gid, None)
-        yield event.plain_result("🧹 本群圣经池、待审核与分群设置已全部清空。")
+        yield event.plain_result("🧹 本群圣经池与分群设置已全部清空。")
 
     @filter.command("圣经开关")
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
@@ -1033,6 +999,8 @@ class GroupBibleGachaPlugin(Star):
         gid = self._gid(event)
         if not gid:
             yield event.plain_result("请在群聊中使用管理指令~")
+            return
+        if not self._whitelisted(gid):
             return
         if not self._is_moderator(event):
             yield event.plain_result("该指令需要群管理员或 AstrBot 管理员权限。")
@@ -1059,8 +1027,9 @@ class GroupBibleGachaPlugin(Star):
         if not gid:
             yield event.plain_result("请在群聊中查看状态~")
             return
+        if not self._whitelisted(gid):
+            return
         pool_state = self._group_state(self._pool, gid)
-        pending_state = self._group_state(self._pending, gid)
         cached = self._essence_cache.get(gid)
         essence_text = f"已缓存 {len(cached[1])} 条" if cached else "未缓存（/抽卡 时自动获取）"
         lines = [
@@ -1068,7 +1037,7 @@ class GroupBibleGachaPlugin(Star):
             f"· 抽卡：{'开' if self._setting(gid, 'gacha') else '关'}　"
             f"投稿：{'开' if self._setting(gid, 'submit') else '关'}　"
             f"戳一戳：{'开' if self._setting(gid, 'poke') else '关'}",
-            f"· 圣经池：{len(pool_state['entries'])} 条　待审核：{len(pending_state['entries'])} 条",
+            f"· 圣经池：{len(pool_state['entries'])} 条",
             f"· 群精华：{essence_text}",
         ]
         yield event.plain_result("\n".join(lines))
@@ -1077,19 +1046,19 @@ class GroupBibleGachaPlugin(Star):
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     async def help_cmd(self, event: AstrMessageEvent):
         """查看群圣经的全部指令"""
+        gid = self._gid(event)
+        if gid and not self._whitelisted(gid):
+            return
         text = (
             "📖 群圣经 · 指令一览\n"
             "─────────────\n"
             "🎴 /抽卡 —— 从群精华/圣经池随机抽一条（/抽卡 精华、/抽卡 池 可指定来源）\n"
-            "🙏 /投稿 文字 —— 投稿圣经（可带图片）\n"
+            "🙏 /投稿 文字 —— 投稿圣经（可带图片，直接入池）\n"
             "↩️ 回复一条消息发 /投稿 —— 把该消息投进圣经池\n"
             "📚 /圣经池 —— 查看本群圣经池概况\n"
-            "🔍 /圣经预览 编号 —— 预览某条投稿/圣经\n"
+            "🔍 /圣经预览 编号 —— 预览圣经池里的条目\n"
             "─────────────\n"
             "🛡️ 管理员：\n"
-            "/圣经审核 —— 列出待审核投稿\n"
-            "/圣经通过 编号|全部 —— 收入圣经池\n"
-            "/圣经拒绝 编号|全部 —— 退回投稿\n"
             "/圣经移除 编号 —— 移出圣经池\n"
             "/圣经开关 抽卡|投稿|戳一戳 开|关 —— 分群开关\n"
             "/圣经状态 —— 查看本群状态\n"
@@ -1115,6 +1084,8 @@ class GroupBibleGachaPlugin(Star):
             gid = str(_raw_get(raw, "group_id") or "")
             if not gid:
                 return  # 好友戳一戳不参与群圣经
+            if not self._whitelisted(gid):
+                return  # 不在白名单的群里保持沉默
             if str(_raw_get(raw, "target_id") or "") != str(event.get_self_id()):
                 return  # 只在被戳时回应，避免刷屏
             if not self._cfg_bool("poke_reply_enabled", True) or not self._setting(gid, "poke"):
@@ -1151,7 +1122,7 @@ class GroupBibleGachaPlugin(Star):
     @staticmethod
     def _parse_ids(message_str: str):
         """从指令文本解析编号列表；含「全部/all」返回 None（表示全部）；解析不出返回 False。"""
-        text = re.sub(r"^(?:圣经通过|圣经拒绝|圣经移除)\s*", "", message_str.strip())
+        text = re.sub(r"^圣经移除\s*", "", message_str.strip())
         if re.search(r"全部|all", text, re.IGNORECASE):
             return None
         ids = sorted({int(x) for x in re.findall(r"\d+", text)})
@@ -1163,32 +1134,6 @@ class GroupBibleGachaPlugin(Star):
             if entry.get("id") == entry_id:
                 return entry
         return None
-
-    def _move_entries(
-        self,
-        src_store: dict,
-        dst_store: dict,
-        gid: str,
-        ids: list[int] | None,
-    ) -> list[tuple[int, int]]:
-        """待审核 -> 圣经池。ids 为 None 表示全部。返回 (投稿编号, 池编号) 列表。"""
-        src_state = self._group_state(src_store, gid)
-        dst_state = self._group_state(dst_store, gid)
-        moved: list[tuple[int, int]] = []
-        keep: list[dict] = []
-        for entry in src_state["entries"]:
-            if ids is None or entry.get("id") in ids:
-                old_id = entry["id"]
-                entry["id"] = dst_state["next_id"]
-                dst_state["next_id"] += 1
-                dst_state["entries"].append(entry)
-                moved.append((old_id, entry["id"]))
-            else:
-                keep.append(entry)
-        if moved:
-            src_state["entries"] = keep
-            self._trim_pool(dst_state)
-        return moved
 
     def _remove_entries(self, store: dict, gid: str, ids: list[int] | None) -> list[int]:
         """从指定库删除条目并清理图片。ids 为 None 表示全部。返回删除的编号。"""

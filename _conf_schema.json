@@ -1,4 +1,10 @@
 {
+  "group_whitelist": {
+    "description": "群聊白名单",
+    "type": "list",
+    "hint": "只填群号，一行一个（如 123456789）。插件只在这些群生效；留空则所有群都生效。不在白名单的群里插件会保持沉默",
+    "default": []
+  },
   "gacha_source": {
     "description": "抽卡内容来源",
     "type": "string",

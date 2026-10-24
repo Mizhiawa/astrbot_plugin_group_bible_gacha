@@ -134,7 +134,7 @@ async def test_gacha_get_msg_fallback_for_missing_url():
     print("test_gacha_get_msg_fallback_for_missing_url OK")
 
 
-async def test_submit_text_and_review():
+async def test_submit_direct_to_pool():
     import main
 
     plugin = fresh_plugin()
@@ -142,20 +142,74 @@ async def test_submit_text_and_review():
     event._msg_str = "投稿 天下第一圣经"
     results = await run_handler(plugin.submit(event))
     assert "投稿成功" in results[0][1]
-    pending = main.GroupBibleGachaPlugin._group_state(plugin._pending, "12345")
-    assert pending["entries"][0]["text"] == "天下第一圣经"
-    assert pending["entries"][0]["id"] == 1
+    pool = main.GroupBibleGachaPlugin._group_state(plugin._pool, "12345")
+    assert pool["entries"][0]["text"] == "天下第一圣经"
+    assert pool["entries"][0]["id"] == 1
 
-    # 群管理员审核
+    # 重复投稿被查重拒绝（清掉冷却再投一次）
+    plugin._submit_cd.clear()
+    event2 = FakeEvent()
+    event2._msg_str = "投稿 天下第一圣经"
+    results = await run_handler(plugin.submit(event2))
+    assert "已经在池子里" in results[0][1]
+    assert len(pool["entries"]) == 1
+
+    # 审核指令已移除
+    assert not hasattr(plugin, "review_list")
+    assert not hasattr(plugin, "approve")
+    assert not hasattr(plugin, "reject")
+
+    # 群管理员移除
     admin = FakeEvent(raw={"sender": {"role": "admin"}})
-    results = await run_handler(plugin.review_list(admin))
-    assert "#1" in results[0][1] and "天下第一圣经" in results[0][1]
-    admin._msg_str = "圣经通过 全部"
-    results = await run_handler(plugin.approve(admin))
-    assert "已通过" in results[0][1]
-    assert len(main.GroupBibleGachaPlugin._group_state(plugin._pool, "12345")["entries"]) == 1
-    assert not main.GroupBibleGachaPlugin._group_state(plugin._pending, "12345")["entries"]
-    print("test_submit_text_and_review OK")
+    admin._msg_str = "圣经移除 1"
+    results = await run_handler(plugin.remove_from_pool(admin))
+    assert "已移出" in results[0][1]
+    assert not main.GroupBibleGachaPlugin._group_state(plugin._pool, "12345")["entries"]
+    print("test_submit_direct_to_pool OK")
+
+
+async def test_whitelist():
+    import main
+
+    plugin = fresh_plugin()
+    plugin.config = {"group_whitelist": ["999"]}
+    bot = FakeBot(essence=[
+        {"sender_id": 1, "sender_nick": "A", "message_id": 1, "time": 0,
+         "content": [{"type": "text", "data": {"text": "白名单群圣经"}}]},
+    ])
+    # 非白名单群：抽卡静默无输出
+    event = FakeEvent(group_id="12345")
+    event.bot = bot
+    assert not await run_handler(plugin.gacha(event))
+    # 非白名单群：投稿也静默
+    event = FakeEvent(group_id="12345")
+    event.bot = bot
+    event._msg_str = "投稿 测试"
+    assert not await run_handler(plugin.submit(event))
+    assert not main.GroupBibleGachaPlugin._group_state(plugin._pool, "12345")["entries"]
+    # 白名单群：正常抽卡
+    event = FakeEvent(group_id="999")
+    event.bot = bot
+    results = await run_handler(plugin.gacha(event))
+    assert results and results[0][0] == "chain"
+    # 非白名单群：戳一戳保持沉默
+    raw = {"post_type": "notice", "notice_type": "notify", "sub_type": "poke",
+           "group_id": 12345, "user_id": 10086, "target_id": 88888}
+    e = FakeEvent(raw=raw)
+    e.bot = bot
+    assert not await run_handler(plugin.on_raw_event(e))
+    # 白名单群：戳一戳正常回复
+    raw999 = dict(raw, group_id=999)
+    e = FakeEvent(raw=raw999)
+    e.bot = bot
+    assert await run_handler(plugin.on_raw_event(e))
+    # 私聊不受白名单限制：投稿返回"请在群聊中使用"提示而非静默
+    e = FakeEvent(group_id="")
+    e.bot = bot
+    e._msg_str = "投稿 私聊测试"
+    results = await run_handler(plugin.submit(e))
+    assert results and "群聊" in results[0][1]
+    print("test_whitelist OK")
 
 
 async def test_submit_via_reply_with_image():
@@ -172,7 +226,7 @@ async def test_submit_via_reply_with_image():
     event.bot = FakeBot()
     results = await run_handler(plugin.submit(event))
     assert "投稿成功" in results[0][1]
-    entry = main.GroupBibleGachaPlugin._group_state(plugin._pending, "12345")["entries"][0]
+    entry = main.GroupBibleGachaPlugin._group_state(plugin._pool, "12345")["entries"][0]
     assert entry["text"] == "图配文"
     assert len(entry["images"]) == 1
     saved = TMP_DIR / "plugin_data" / "images" / entry["images"][0]
@@ -233,7 +287,8 @@ async def main_async():
     await test_gacha_fallback_to_pool()
     await test_gacha_both_empty()
     await test_gacha_get_msg_fallback_for_missing_url()
-    await test_submit_text_and_review()
+    await test_submit_direct_to_pool()
+    await test_whitelist()
     await test_submit_via_reply_with_image()
     await test_poke_reply_and_cooldown()
     await test_poke_ignored_cases()

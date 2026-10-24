@@ -243,29 +243,30 @@ def test_entry_lifecycle():
 
     async def run():
         gid = "12345"
-        pending = main.GroupBibleGachaPlugin._group_state(plugin._pending, gid)
         pool = main.GroupBibleGachaPlugin._group_state(plugin._pool, gid)
-        # 模拟三条投稿
+        # 模拟三条投稿直接入池（key 用与投稿相同的生成方式）
         for i in range(3):
-            pending["entries"].append(
-                {"id": pending["next_id"], "text": f"圣经{i}", "images": [], "sender_id": "1", "sender_name": "s", "time": 0, "source": "submit", "key": f"k{i}"},
+            pool["entries"].append(
+                {"id": pool["next_id"], "text": f"圣经{i}", "images": [], "sender_id": "1", "sender_name": "s", "time": 0, "source": "submit", "key": plugin._entry_key("1", f"圣经{i}", 0)},
             )
-            pending["next_id"] += 1
-        moved = plugin._move_entries(plugin._pending, plugin._pool, gid, [1, 3])
-        assert moved == [(1, 1), (3, 2)], moved
-        assert len(pool["entries"]) == 2 and len(pending["entries"]) == 1
-        assert pending["entries"][0]["id"] == 2
-        # 拒绝剩余
-        removed = plugin._remove_entries(plugin._pending, gid, None)
-        assert removed == [2]
-        assert not pending["entries"]
-        # 移除池内 #1（即"圣经0"），剩 pool#2 = "圣经2"
-        removed = plugin._remove_entries(plugin._pool, gid, [1])
-        assert removed == [1]
+            pool["next_id"] += 1
+        # 查重键命中
+        key = plugin._entry_key("1", "圣经0", 0)
+        assert any(e.get("key") == key for e in pool["entries"])
+        # 移除 #1、#3，剩 #2
+        removed = plugin._remove_entries(plugin._pool, gid, [1, 3])
+        assert removed == [1, 3]
         assert len(pool["entries"]) == 1 and pool["entries"][0]["id"] == 2
         # 渲染
         comps = plugin._pool_components(pool["entries"][0])
-        assert any(isinstance(c, Plain) and c.text == "圣经2" for c in comps)
+        assert any(isinstance(c, Plain) and c.text == "圣经1" for c in comps)
+        # 容量淘汰：上限 10，塞 15 条后只剩最新 10 条
+        plugin2 = main.GroupBibleGachaPlugin(Context(), {"max_pool_size": 10})
+        state = main.GroupBibleGachaPlugin._group_state(plugin2._pool, gid)
+        for i in range(15):
+            state["entries"].append({"id": i + 1, "text": f"t{i}", "images": [], "sender_id": "1", "sender_name": "s", "time": 0, "source": "submit", "key": f"x{i}"})
+        plugin2._trim_pool(state)
+        assert len(state["entries"]) == 10 and state["entries"][0]["text"] == "t5"
 
     asyncio.run(run())
     print("test_entry_lifecycle OK")
@@ -294,12 +295,12 @@ def test_storage_roundtrip():
     gid = "777"
 
     async def run():
-        state = main.GroupBibleGachaPlugin._group_state(plugin._pending, gid)
+        state = main.GroupBibleGachaPlugin._group_state(plugin._pool, gid)
         state["entries"].append({"id": state["next_id"], "text": "存盘测试", "images": [], "sender_id": "1", "sender_name": "s", "time": 0, "source": "submit", "key": "kk"})
         state["next_id"] += 1
-        await plugin._save(plugin._pending_file, plugin._pending)
+        await plugin._save(plugin._pool_file, plugin._pool)
         plugin2 = main.GroupBibleGachaPlugin(Context(), {})
-        assert plugin2._group_state(plugin2._pending, gid)["entries"][0]["text"] == "存盘测试"
+        assert plugin2._group_state(plugin2._pool, gid)["entries"][0]["text"] == "存盘测试"
 
     asyncio.run(run())
     print("test_storage_roundtrip OK")
