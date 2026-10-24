@@ -1,0 +1,86 @@
+{
+  "gacha_source": {
+    "description": "抽卡内容来源",
+    "type": "string",
+    "options": ["both", "essence", "pool"],
+    "hint": "both=精华消息+圣经池混合抽取；essence=仅群精华消息；pool=仅圣经池投稿",
+    "default": "both"
+  },
+  "gacha_cooldown": {
+    "description": "抽卡冷却（秒）",
+    "type": "int",
+    "hint": "同一群友两次抽卡的最小间隔，避免刷屏并保护 2H2G 服务器",
+    "default": 15
+  },
+  "essence_cache_minutes": {
+    "description": "精华列表缓存（分钟）",
+    "type": "int",
+    "hint": "缓存群精华列表以减少 API 调用；0 为不缓存",
+    "default": 10
+  },
+  "poke_reply_enabled": {
+    "description": "戳一戳回复（总开关）",
+    "type": "bool",
+    "hint": "被戳一戳时随机回敬一条圣经；还可用 /圣经开关 戳一戳 关 按群关闭",
+    "default": true
+  },
+  "poke_reply_source": {
+    "description": "戳一戳回复来源",
+    "type": "string",
+    "options": ["both", "essence", "pool", "text"],
+    "hint": "both=精华+圣经池；essence=仅精华；pool=仅圣经池；text=只用下方戳一戳文案",
+    "default": "both"
+  },
+  "poke_cooldown": {
+    "description": "戳一戳冷却（秒）",
+    "type": "int",
+    "hint": "同一个群两次戳一戳回复的最小间隔",
+    "default": 30
+  },
+  "poke_texts": {
+    "description": "戳一戳兜底文案",
+    "type": "list",
+    "hint": "精华和圣经池都拿不到内容时，随机回复其中一条",
+    "default": [
+      "别戳啦，再戳我就把圣经背给你听（/抽卡）",
+      "戳我干嘛！想抽圣经就发 /抽卡",
+      "呀，被发现了~ 今天你抽到群圣经了吗？"
+    ]
+  },
+  "allow_group_admin": {
+    "description": "允许群管理员审核",
+    "type": "bool",
+    "hint": "开启后 QQ 群主/群管理员可直接审核本群投稿；AstrBot 管理员（SU）始终有权限",
+    "default": true
+  },
+  "submit_cooldown": {
+    "description": "投稿冷却（秒）",
+    "type": "int",
+    "hint": "同一群友两次投稿的最小间隔",
+    "default": 60
+  },
+  "max_images_per_submit": {
+    "description": "单次投稿图片上限",
+    "type": "int",
+    "hint": "一次投稿最多携带的图片张数",
+    "default": 3
+  },
+  "image_max_mb": {
+    "description": "单张图片大小上限（MB）",
+    "type": "int",
+    "hint": "超过该大小的图片不会被保存",
+    "default": 10
+  },
+  "max_pool_size": {
+    "description": "每群圣经池容量",
+    "type": "int",
+    "hint": "每群圣经池最多保存的条数，超出后最旧的条目（连同图片）会被淘汰",
+    "default": 500
+  },
+  "debug": {
+    "description": "输出诊断日志",
+    "type": "bool",
+    "hint": "开启后打印更详细的错误堆栈，排查问题时使用",
+    "default": false
+  }
+}

@@ -1,0 +1,10 @@
+name: astrbot_plugin_group_bible_gacha
+display_name: 群圣经抽卡
+desc: 群圣经抽卡：/抽卡 从群精华消息/圣经池中随机抽取一条发送展现；支持文字与图片投稿圣经池（回复消息即可投稿），管理员审核入库，戳一戳机器人随机回敬圣经；支持分群开关管理与 SU 审核、精华导入、重置等管理指令。
+short_desc: 精华抽卡 + 圣经池投稿 + 戳一戳回复
+version: v1.0.0
+author: Mizhiawa
+repo: https://github.com/Mizhiawa/astrbot_plugin_group_bible_gacha
+support_platforms:
+  - aiocqhttp
+astrbot_version: ">=4.0"

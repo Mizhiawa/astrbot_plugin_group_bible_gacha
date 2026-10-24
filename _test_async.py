@@ -1,0 +1,245 @@
+"""异步冒烟测试：用假 bot/event 走完 抽卡/投稿/审核/戳一戳 全链路。"""
+
+import asyncio
+import sys
+import types
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import _test_stubs as stubs  # noqa: E402  复用桩与导入
+from _test_stubs import (  # noqa: E402
+    Context,
+    FakeEvent,
+    Image,
+    Plain,
+    Reply,
+    TMP_DIR,
+    fresh_plugin,
+)
+
+
+class FakeBot:
+    """假 OneBot 客户端：call_action / call_api 双入口。"""
+
+    def __init__(self, essence=None, msgs=None):
+        self.essence = essence or []
+        self.msgs = msgs or {}
+        self.calls = []
+
+    async def call_action(self, action, **params):
+        return await self.call_api(action, **params)
+
+    async def call_api(self, action, **params):
+        self.calls.append((action, params))
+        if action == "get_essence_msg_list":
+            return list(self.essence)
+        if action == "get_msg":
+            return self.msgs.get(params.get("message_id"))
+        return {}
+
+
+def drain(gen):
+    out = []
+    for item in gen:
+        out.append(item)
+    return out
+
+
+async def run_handler(agen):
+    results = []
+    async for res in agen:
+        results.append(res)
+    return results
+
+
+async def test_gacha_from_essence():
+    plugin = fresh_plugin()
+    bot = FakeBot(
+        essence=[
+            {
+                "sender_id": 10086,
+                "sender_nick": "张三",
+                "operator_id": 10010,
+                "operator_nick": "群主",
+                "time": 1761283200,
+                "message_id": 9001,
+                "content": [
+                    {"type": "text", "data": {"text": "今天也是充满希望的一天呢"}},
+                    {"type": "image", "data": {"url": "https://example.com/x.jpg"}},
+                ],
+            },
+        ],
+    )
+    event = FakeEvent()
+    event.bot = bot
+    results = await run_handler(plugin.gacha(event))
+    assert results, "抽卡应有输出"
+    kind, chain = results[0]
+    assert kind == "chain"
+    texts = "".join(c.text for c in chain if isinstance(c, Plain))
+    assert "精华加冕" in texts and "张三" in texts and "群主" in texts
+    assert any(isinstance(c, Image) and c.file == "https://example.com/x.jpg" for c in chain)
+    print("test_gacha_from_essence OK")
+
+
+async def test_gacha_fallback_to_pool():
+    plugin = fresh_plugin()
+    bot = FakeBot(essence=[])  # 精华为空
+    event = FakeEvent()
+    event.bot = bot
+    state = main.GroupBibleGachaPlugin._group_state(plugin._pool, "12345")
+    state["entries"].append({"id": 1, "text": "池子圣经", "images": [], "sender_id": "2", "sender_name": "李四", "time": 0, "source": "submit", "key": "k"})
+    state["next_id"] = 2
+    results = await run_handler(plugin.gacha(event))
+    kind, chain = results[0]
+    texts = "".join(c.text for c in chain if isinstance(c, Plain))
+    assert "投稿圣典" in texts and "池子圣经" in texts
+    print("test_gacha_fallback_to_pool OK")
+
+
+async def test_gacha_both_empty():
+    plugin = fresh_plugin()
+    bot = FakeBot(essence=[])
+    event = FakeEvent()
+    event.bot = bot
+    results = await run_handler(plugin.gacha(event))
+    assert results and results[0][0] == "plain"
+    assert "投喂" in results[0][1] or "空" in results[0][1]
+    print("test_gacha_both_empty OK")
+
+
+async def test_gacha_get_msg_fallback_for_missing_url():
+    plugin = fresh_plugin()
+    # 精华返回的图片缺 url，但 get_msg 能拿到带 url 的完整消息
+    bot = FakeBot(
+        essence=[
+            {"sender_id": 1, "sender_nick": "A", "message_id": 42, "time": 0,
+             "content": [{"type": "text", "data": {"text": "看图"}}, {"type": "image", "data": {"file": "NOURL.image"}}]},
+        ],
+        msgs={
+            42: {"message_id": 42, "message": [
+                {"type": "text", "data": {"text": "看图"}},
+                {"type": "image", "data": {"url": "https://cdn.example.com/fresh.jpg"}},
+            ]},
+        },
+    )
+    event = FakeEvent()
+    event.bot = bot
+    results = await run_handler(plugin.gacha(event))
+    _, chain = results[0]
+    assert any(isinstance(c, Image) and c.file == "https://cdn.example.com/fresh.jpg" for c in chain)
+    print("test_gacha_get_msg_fallback_for_missing_url OK")
+
+
+async def test_submit_text_and_review():
+    import main
+
+    plugin = fresh_plugin()
+    event = FakeEvent()
+    event._msg_str = "投稿 天下第一圣经"
+    results = await run_handler(plugin.submit(event))
+    assert "投稿成功" in results[0][1]
+    pending = main.GroupBibleGachaPlugin._group_state(plugin._pending, "12345")
+    assert pending["entries"][0]["text"] == "天下第一圣经"
+    assert pending["entries"][0]["id"] == 1
+
+    # 群管理员审核
+    admin = FakeEvent(raw={"sender": {"role": "admin"}})
+    results = await run_handler(plugin.review_list(admin))
+    assert "#1" in results[0][1] and "天下第一圣经" in results[0][1]
+    admin._msg_str = "圣经通过 全部"
+    results = await run_handler(plugin.approve(admin))
+    assert "已通过" in results[0][1]
+    assert len(main.GroupBibleGachaPlugin._group_state(plugin._pool, "12345")["entries"]) == 1
+    assert not main.GroupBibleGachaPlugin._group_state(plugin._pending, "12345")["entries"]
+    print("test_submit_text_and_review OK")
+
+
+async def test_submit_via_reply_with_image():
+    import main
+
+    plugin = fresh_plugin()
+    event = FakeEvent()
+    event._msg_str = "投稿"
+    quoted = Image(file="https://example.com/quoted.jpg")
+    event.message_obj.message = [
+        Reply(id="42", chain=[Plain("图配文"), quoted], message_str="图配文", sender_id="10010"),
+    ]
+    # 给 FakeBot 一个 get_msg（本用例直接用 Reply.chain，无需调用）
+    event.bot = FakeBot()
+    results = await run_handler(plugin.submit(event))
+    assert "投稿成功" in results[0][1]
+    entry = main.GroupBibleGachaPlugin._group_state(plugin._pending, "12345")["entries"][0]
+    assert entry["text"] == "图配文"
+    assert len(entry["images"]) == 1
+    saved = TMP_DIR / "plugin_data" / "images" / entry["images"][0]
+    assert saved.is_file(), "图片应已复制进插件图片目录"
+    print("test_submit_via_reply_with_image OK")
+
+
+async def test_poke_reply_and_cooldown():
+    plugin = fresh_plugin()
+    bot = FakeBot(essence=[
+        {"sender_id": 1, "sender_nick": "A", "message_id": 1, "time": 0,
+         "content": [{"type": "text", "data": {"text": "戳我抽到的圣经"}}]},
+    ])
+    raw = {"post_type": "notice", "notice_type": "notify", "sub_type": "poke",
+           "group_id": 12345, "user_id": 10086, "target_id": 88888}
+    event = FakeEvent(raw=raw)
+    event.bot = bot
+    results = await run_handler(plugin.on_raw_event(event))
+    assert results, "被戳应有回复"
+    kind, chain = results[0]
+    assert kind == "chain"
+    assert any(isinstance(c, stubs.At) and str(c.qq) == "10086" for c in chain)
+
+    # 冷却期内再戳：无输出
+    event2 = FakeEvent(raw=raw)
+    event2.bot = bot
+    results = await run_handler(plugin.on_raw_event(event2))
+    assert not results, "冷却期内不应回复"
+    print("test_poke_reply_and_cooldown OK")
+
+
+async def test_poke_ignored_cases():
+    plugin = fresh_plugin()
+    bot = FakeBot(essence=[])
+    # 戳别人：不回
+    raw_other = {"post_type": "notice", "notice_type": "notify", "sub_type": "poke",
+                 "group_id": 12345, "user_id": 10086, "target_id": 10010}
+    e = FakeEvent(raw=raw_other)
+    e.bot = bot
+    assert not await run_handler(plugin.on_raw_event(e))
+    # 撤回通知：不回
+    raw_recall = {"post_type": "notice", "notice_type": "group_recall", "group_id": 12345}
+    e = FakeEvent(raw=raw_recall)
+    e.bot = bot
+    assert not await run_handler(plugin.on_raw_event(e))
+    # 关闭分群开关：不回
+    plugin._settings["12345"] = {"poke": False}
+    raw_self = {"post_type": "notice", "notice_type": "notify", "sub_type": "poke",
+                "group_id": 12345, "user_id": 10086, "target_id": 88888}
+    e = FakeEvent(raw=raw_self)
+    e.bot = bot
+    assert not await run_handler(plugin.on_raw_event(e))
+    print("test_poke_ignored_cases OK")
+
+
+async def main_async():
+    await test_gacha_from_essence()
+    await test_gacha_fallback_to_pool()
+    await test_gacha_both_empty()
+    await test_gacha_get_msg_fallback_for_missing_url()
+    await test_submit_text_and_review()
+    await test_submit_via_reply_with_image()
+    await test_poke_reply_and_cooldown()
+    await test_poke_ignored_cases()
+    print("\nALL ASYNC TESTS PASSED")
+
+
+if __name__ == "__main__":
+    import _test_stubs  # noqa: F401  确保 main 已可用
+    from _test_stubs import main  # noqa: F401
+
+    asyncio.run(main_async())
