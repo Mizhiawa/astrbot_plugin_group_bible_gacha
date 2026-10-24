@@ -279,8 +279,10 @@ def test_render_draw():
         {"sender_id": "1", "sender_name": "张三", "operator_name": "李四", "time": 1761283200, "id": 99},
     )
     texts = [c.text for c in chain if isinstance(c, Plain)]
-    assert any("精华加冕" in t for t in texts)
-    assert any("张三" in t and "李四" in t for t in texts)
+    joined = "".join(texts)
+    assert "精华加冕" not in joined and "投稿圣典" not in joined  # 标题已去除
+    assert "一条圣经" in joined
+    assert "张三" in joined and "李四" in joined
     chain = plugin._render_draw("pool", [Plain("x")], {"sender_id": "1", "sender_name": "王五", "operator_name": "", "time": 0, "id": 7})
     texts = [c.text for c in chain if isinstance(c, Plain)]
     assert any("#7" in t for t in texts)

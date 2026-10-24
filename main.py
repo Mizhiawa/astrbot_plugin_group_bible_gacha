@@ -526,9 +526,7 @@ class GroupBibleGachaPlugin(Star):
         return None, [], None
 
     def _render_draw(self, used_source: str, comps: list, meta: dict | None) -> list:
-        head = "🎴 群圣经 · " + ("精华加冕" if used_source == "essence" else "投稿圣典")
-        chain: list = [Plain(f"{head}\n─────────────\n")]
-        chain.extend(comps)
+        chain: list = list(comps)
         info = "\n─────────────\n"
         if meta:
             who = meta.get("sender_name") or meta.get("sender_id") or "佚名"

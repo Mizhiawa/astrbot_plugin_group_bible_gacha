@@ -78,7 +78,8 @@ async def test_gacha_from_essence():
     kind, chain = results[0]
     assert kind == "chain"
     texts = "".join(c.text for c in chain if isinstance(c, Plain))
-    assert "精华加冕" in texts and "张三" in texts and "群主" in texts
+    assert "精华加冕" not in texts  # 标题已去除
+    assert "张三" in texts and "群主" in texts
     assert any(isinstance(c, Image) and c.file == "https://example.com/x.jpg" for c in chain)
     print("test_gacha_from_essence OK")
 
@@ -94,7 +95,8 @@ async def test_gacha_fallback_to_pool():
     results = await run_handler(plugin.gacha(event))
     kind, chain = results[0]
     texts = "".join(c.text for c in chain if isinstance(c, Plain))
-    assert "投稿圣典" in texts and "池子圣经" in texts
+    assert "投稿圣典" not in texts  # 标题已去除
+    assert "池子圣经" in texts
     print("test_gacha_fallback_to_pool OK")
 
 
