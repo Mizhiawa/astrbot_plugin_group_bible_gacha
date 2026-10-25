@@ -284,9 +284,21 @@ def test_render_draw():
     assert "精华加冕" not in joined and "投稿圣典" not in joined  # 标题已去除
     assert "一条圣经" in joined
     assert "张三" in joined and "李四" in joined
+    # 排版回归：换行必须在消息段内部（QQ 会吞掉段首换行导致粘连）
+    for c in chain:
+        if isinstance(c, Plain):
+            assert not c.text.startswith("\n"), f"消息段以换行开头：{c.text[:20]!r}"
+    assert "一条圣经\n────" in joined
     chain = plugin._render_draw("pool", [Plain("x")], {"sender_id": "1", "sender_name": "王五", "operator_name": "", "time": 0, "id": 7})
     texts = [c.text for c in chain if isinstance(c, Plain)]
+    joined = "".join(texts)
     assert not any("#7" in t for t in texts)  # 抽卡展示不带编号
+    assert "x\n────" in joined
+    # 图片结尾时分隔线单独成段，但同样不能以换行开头
+    chain = plugin._render_draw("pool", [Plain("看图"), Image(file="file:///a.jpg")], None)
+    for c in chain:
+        if isinstance(c, Plain):
+            assert not c.text.startswith("\n")
     print("test_render_draw OK")
 
 

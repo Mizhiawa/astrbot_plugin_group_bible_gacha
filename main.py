@@ -598,15 +598,24 @@ class GroupBibleGachaPlugin(Star):
 
     def _render_draw(self, used_source: str, comps: list, meta: dict | None) -> list:
         chain: list = list(comps)
-        info = "\n─────────────\n"
+        info_lines = ["─────────────"]
         if meta:
             who = meta.get("sender_name") or meta.get("sender_id") or "佚名"
-            info += f"📖 出自：{who}"
+            head = f"📖 出自：{who}"
             if used_source == "essence" and meta.get("operator_name"):
-                info += f"　✍️ 加精：{meta['operator_name']}"
+                head += f"　✍️ 加精：{meta['operator_name']}"
+            info_lines.append(head)
             if meta.get("time"):
-                info += f"\n🕒 {time.strftime('%Y-%m-%d %H:%M', time.localtime(meta['time']))}"
-        chain.append(Plain(info))
+                info_lines.append(
+                    f"🕒 {time.strftime('%Y-%m-%d %H:%M', time.localtime(meta['time']))}",
+                )
+        info_text = "\n".join(info_lines)
+        # QQ 客户端会吞掉消息段开头的换行符，所以换行要并进前一个文本段内部；
+        # 前一段是图片时无需换行（图片在 QQ 中本来就独占一行）
+        if chain and isinstance(chain[-1], Plain):
+            chain[-1] = Plain(chain[-1].text.rstrip() + "\n" + info_text)
+        else:
+            chain.append(Plain(info_text))
         return chain
 
     # ------------------------------------------------------------- 图片落盘
@@ -877,9 +886,14 @@ class GroupBibleGachaPlugin(Star):
         if entry is None:
             yield event.plain_result(f"圣经池里没有编号 #{match.group()} 的条目。")
             return
-        chain = [Plain(f"🔍 圣经池 #{entry['id']}（{entry.get('sender_name', '')}）：\n")]
-        chain.extend(self._pool_components(entry))
-        yield event.chain_result(chain)
+        header = f"🔍 圣经池 #{entry['id']}（{entry.get('sender_name', '')}）："
+        body = self._pool_components(entry)
+        # 换行并进首个文本段内部，避免 QQ 吞掉段首/段尾换行导致粘连
+        if body and isinstance(body[0], Plain):
+            body[0] = Plain(header + "\n" + body[0].text.lstrip("\n"))
+            yield event.chain_result(body)
+        else:
+            yield event.chain_result([Plain(header), *body])
 
     # ================================================================ 管理指令
 
@@ -1134,11 +1148,13 @@ class GroupBibleGachaPlugin(Star):
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"[群圣经] 戳一戳抽卡失败：{e}")
             if comps:
-                chain: list = [
-                    At(qq=poker),
-                    Plain(" 你戳了戳我，于是给你抽了条群圣经：\n─────────────\n"),
-                ]
-                chain.extend(comps)
+                intro = " 你戳了戳我，于是给你抽了条群圣经：\n─────────────"
+                # 换行并进首个文本段内部，避免 QQ 吞掉段尾换行导致内容粘连
+                if isinstance(comps[0], Plain):
+                    merged = Plain(intro + "\n" + comps[0].text.lstrip("\n"))
+                    chain: list = [At(qq=poker), merged, *comps[1:]]
+                else:
+                    chain = [At(qq=poker), Plain(intro), *comps]
             else:
                 texts = self._cfg_list("poke_texts", []) or [
                     "别戳啦，圣经在 /抽卡 里，自己去抽！",

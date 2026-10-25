@@ -250,6 +250,12 @@ async def test_poke_reply_and_cooldown():
     kind, chain = results[0]
     assert kind == "chain"
     assert any(isinstance(c, stubs.At) and str(c.qq) == "10086" for c in chain)
+    # 排版回归：段首不能是换行，引导语与内容之间的换行要在段内
+    joined = "".join(c.text for c in chain if isinstance(c, Plain))
+    for c in chain:
+        if isinstance(c, Plain):
+            assert not c.text.startswith("\n")
+    assert "─────\n戳我抽到的圣经" in joined
 
     # 冷却期内再戳：无输出
     event2 = FakeEvent(raw=raw)
@@ -345,6 +351,26 @@ async def test_gacha_unrenderable_placeholder():
     print("test_gacha_unrenderable_placeholder OK")
 
 
+async def test_preview_layout():
+    """/圣经预览 的标题换行要并入首个文本段，避免被 QQ 吞掉。"""
+    import main
+
+    plugin = fresh_plugin()
+    state = main.GroupBibleGachaPlugin._group_state(plugin._pool, "12345")
+    state["entries"].append({"id": 1, "text": "预览内容", "images": [], "sender_id": "2", "sender_name": "李四", "time": 0, "source": "submit", "key": "k"})
+    event = FakeEvent()
+    event._msg_str = "圣经预览 1"
+    results = await run_handler(plugin.preview_entry(event))
+    assert results and results[0][0] == "chain"
+    chain = results[0][1]
+    joined = "".join(c.text for c in chain if isinstance(c, Plain))
+    for c in chain:
+        if isinstance(c, Plain):
+            assert not c.text.startswith("\n")
+    assert "🔍 圣经池 #1（李四）：\n预览内容" in joined
+    print("test_preview_layout OK")
+
+
 async def main_async():
     await test_gacha_from_essence()
     await test_gacha_fallback_to_pool()
@@ -356,6 +382,7 @@ async def main_async():
     await test_submit_direct_to_pool()
     await test_whitelist()
     await test_submit_via_reply_with_image()
+    await test_preview_layout()
     await test_poke_reply_and_cooldown()
     await test_poke_ignored_cases()
     print("\nALL ASYNC TESTS PASSED")
