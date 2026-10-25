@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -282,11 +283,76 @@ async def test_poke_ignored_cases():
     print("test_poke_ignored_cases OK")
 
 
+async def test_draw_merged_uniform():
+    """精华与池子合并均匀抽取：两边都要能被抽到。"""
+    plugin = fresh_plugin()
+    bot = FakeBot(essence=[
+        {"sender_id": 1, "sender_nick": "A", "message_id": 1, "time": 0,
+         "content": [{"type": "text", "data": {"text": "精华内容"}}]},
+    ])
+    event = FakeEvent()
+    event.bot = bot
+    state = main.GroupBibleGachaPlugin._group_state(plugin._pool, "12345")
+    state["entries"].append({"id": 1, "text": "池子内容", "images": [], "sender_id": "2", "sender_name": "B", "time": 0, "source": "submit", "key": "k"})
+    state["next_id"] = 2
+    kinds = set()
+    for _ in range(30):
+        used, comps, meta, reason = await plugin._draw(event, "12345", "both")
+        assert used in ("essence", "pool") and not reason
+        kinds.add(used)
+    assert kinds == {"essence", "pool"}, f"合并抽取应两边都可能出现：{kinds}"
+    # 指定来源仍然生效
+    used, _, _, reason = await plugin._draw(event, "12345", "pool")
+    assert used == "pool" and not reason
+    print("test_draw_merged_uniform OK")
+
+
+async def test_gacha_essence_forced_refresh():
+    """/抽卡 精华 应绕过空结果缓存强制拉取。"""
+    plugin = fresh_plugin()
+    # 模拟之前缓存了"空精华"
+    plugin._essence_cache["12345"] = (time.time(), [])
+    bot = FakeBot(essence=[
+        {"sender_id": 1, "sender_nick": "A", "message_id": 1, "time": 0,
+         "content": [{"type": "text", "data": {"text": "新鲜的精华"}}]},
+    ])
+    event = FakeEvent()
+    event.bot = bot
+    event._msg_str = "抽卡 精华"
+    results = await run_handler(plugin.gacha(event))
+    assert results and results[0][0] == "chain", "强制抽取应成功而非报空"
+    texts = "".join(c.text for c in results[0][1] if isinstance(c, Plain))
+    assert "新鲜的精华" in texts
+    assert any(c[0] == "get_essence_msg_list" for c in bot.calls), "应真实调用精华接口"
+    print("test_gacha_essence_forced_refresh OK")
+
+
+async def test_gacha_unrenderable_placeholder():
+    """精华条目内容无法还原时应给占位展示，而不是谎报精华为空。"""
+    plugin = fresh_plugin()
+    bot = FakeBot(essence=[
+        {"sender_id": 10086, "sender_nick": "张三", "message_id": 555, "time": 1761283200,
+         "content": None},  # 无内容且 get_msg 拿不到
+    ])
+    event = FakeEvent()
+    event.bot = bot
+    event._msg_str = "抽卡 精华"
+    results = await run_handler(plugin.gacha(event))
+    assert results and results[0][0] == "chain", "有精华但还原失败应展示占位"
+    texts = "".join(c.text for c in results[0][1] if isinstance(c, Plain))
+    assert "暂时无法还原" in texts
+    assert "张三" in texts
+    print("test_gacha_unrenderable_placeholder OK")
+
+
 async def main_async():
     await test_gacha_from_essence()
     await test_gacha_fallback_to_pool()
     await test_gacha_both_empty()
     await test_gacha_get_msg_fallback_for_missing_url()
+    await test_draw_merged_uniform()
+    await test_gacha_essence_forced_refresh()
+    await test_gacha_unrenderable_placeholder()
     await test_submit_direct_to_pool()
     await test_whitelist()
     await test_submit_via_reply_with_image()

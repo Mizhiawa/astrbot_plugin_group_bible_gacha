@@ -49,6 +49,10 @@ PREVIEW_LEN = 60
 COOLDOWN_GC_SIZE = 4096
 # 一次导入精华的条数上限
 IMPORT_LIMIT = 1000
+# 精华内容连续还原失败时的尝试条数
+RENDER_ATTEMPTS = 5
+# 群精华空结果的缓存秒数（避免刚加精的群长时间抽不到新精华）
+EMPTY_CACHE_TTL = 60
 # 每群配置项的默认值
 GROUP_DEFAULTS = {"gacha": True, "submit": True, "poke": True}
 # 开关指令里的功能名 -> 配置键
@@ -317,11 +321,13 @@ class GroupBibleGachaPlugin(Star):
         return None
 
     async def _fetch_essence(self, event: AstrMessageEvent, gid: str, force: bool = False):
-        """获取群精华消息列表；失败返回 None，空群返回 []。带缓存。"""
+        """获取群精华消息列表；失败返回 None，空群返回 []。带缓存（空结果只短缓存）。"""
         ttl = self._cfg_int("essence_cache_minutes", 10) * 60
         cached = self._essence_cache.get(gid)
-        if cached and not force and ttl > 0 and time.time() - cached[0] < ttl:
-            return cached[1]
+        if cached and not force and ttl > 0:
+            effective_ttl = ttl if cached[1] else min(ttl, EMPTY_CACHE_TTL)
+            if time.time() - cached[0] < effective_ttl:
+                return cached[1]
         gid_param = int(gid) if gid.isdigit() else gid
         res = await self._call(event, "get_essence_msg_list", {"group_id": gid_param})
         items = None
@@ -442,13 +448,13 @@ class GroupBibleGachaPlugin(Star):
         return None
 
     async def _essence_components(self, event: AstrMessageEvent, item: dict) -> list:
-        """把一条精华消息渲染成组件；图片缺直链时用 get_msg 兜底。"""
+        """把一条精华消息渲染成组件；实在还原不出任何内容时返回空列表。"""
         mid = item.get("message_id")
         content = item.get("content")
         comps: list = []
         if isinstance(content, list) and content:
             comps, missing = self._parse_segments(content)
-            if not missing:
+            if comps and not missing:
                 return comps
         if mid is not None:
             res = await self._call(event, "get_msg", {"message_id": mid})
@@ -461,7 +467,18 @@ class GroupBibleGachaPlugin(Star):
                 fresh = self._parse_cq_string(msg)
                 if fresh:
                     return fresh
-        if isinstance(content, str) and content:
+        if isinstance(content, str) and content.strip():
+            stripped = content.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                # 个别实现的 content 是 JSON 字符串而非 CQ 码
+                try:
+                    parsed = json.loads(stripped)
+                except (ValueError, TypeError):
+                    parsed = None
+                if isinstance(parsed, list):
+                    fresh, _ = self._parse_segments(parsed)
+                    if fresh:
+                        return fresh
             fresh = self._parse_cq_string(content)
             if fresh:
                 return fresh
@@ -526,40 +543,58 @@ class GroupBibleGachaPlugin(Star):
         event: AstrMessageEvent,
         gid: str,
         source: str,
-    ) -> tuple[str | None, list, dict | None]:
-        """按来源抽一条。返回 (实际来源, 组件, 元信息)；抽不到返回 (None, [], None)。"""
+        force: bool = False,
+    ) -> tuple[str | None, list, dict | None, str]:
+        """抽一条圣经。
+
+        both 模式下，精华消息与圣经池条目会合并成一个候选集后均匀随机
+        抽取（每个条目被抽中的概率相同），而不是精华/池子各一半。
+        返回 (实际来源, 组件, 元信息, 失败原因)；抽到时 reason 为空串。
+        """
         want_essence = source in ("essence", "both")
         want_pool = source in ("pool", "both")
         pool_entries = self._group_state(self._pool, gid)["entries"]
 
         essence_items = None
+        essence_error = False
         if want_essence:
-            essence_items = await self._fetch_essence(event, gid)
-            if not essence_items:
-                essence_items = None
+            essence_items = await self._fetch_essence(event, gid, force=force)
+            if essence_items is None:
+                essence_error = True
 
-        has_essence = bool(essence_items)
-        has_pool = bool(pool_entries)
-        if not (has_essence or has_pool):
-            return None, [], None
-
+        candidates: list[tuple[str, object]] = []
+        if essence_items:
+            candidates.extend(("essence", item) for item in essence_items)
+        if pool_entries:
+            candidates.extend(("pool", entry) for entry in pool_entries)
         if want_essence and not want_pool:
-            order = ["essence"]
+            candidates = [c for c in candidates if c[0] == "essence"]
         elif want_pool and not want_essence:
-            order = ["pool"]
-        else:
-            order = ["essence", "pool"] if random.random() < 0.5 else ["pool", "essence"]
+            candidates = [c for c in candidates if c[0] == "pool"]
 
-        for src in order:
-            if src == "essence" and has_essence:
-                item = random.choice(essence_items)
-                comps = await self._essence_components(event, item)
-                if comps:
-                    return "essence", comps, self._essence_meta(item)
-            elif src == "pool" and has_pool:
-                entry = random.choice(pool_entries)
-                return "pool", self._pool_components(entry), self._pool_meta(entry)
-        return None, [], None
+        if not candidates:
+            if want_pool and not want_essence:
+                reason = "圣经池还是空的，快用 /投稿 投喂第一条圣经吧！"
+            elif essence_error:
+                reason = "获取群精华失败（NapCat 可能不支持该接口或机器人权限不足），圣经池也是空的"
+            else:
+                reason = "群精华还没有内容，圣经池也是空的，快用 /投稿 投喂第一条圣经吧！"
+            return None, [], None, reason
+
+        random.shuffle(candidates)
+        for kind, obj in candidates[:RENDER_ATTEMPTS]:
+            if kind == "essence":
+                comps = await self._essence_components(event, obj)
+            else:
+                comps = self._pool_components(obj)
+            if comps:
+                meta = self._essence_meta(obj) if kind == "essence" else self._pool_meta(obj)
+                return kind, comps, meta, ""
+
+        # 候选存在但内容都还原不了：给第一条一个占位展示，而不是谎报为空
+        kind, obj = candidates[0]
+        meta = self._essence_meta(obj) if kind == "essence" else self._pool_meta(obj)
+        return kind, [Plain("[这条内容暂时无法还原]")], meta, ""
 
     def _render_draw(self, used_source: str, comps: list, meta: dict | None) -> list:
         chain: list = list(comps)
@@ -663,7 +698,8 @@ class GroupBibleGachaPlugin(Star):
             return
 
         arg = re.sub(r"^(?:抽圣经|圣经抽卡|抽卡)\s*", "", event.get_message_str().strip())
-        if "精华" in arg:
+        arg_has_essence = "精华" in arg
+        if arg_has_essence:
             source = "essence"
         elif "池" in arg:
             source = "pool"
@@ -681,17 +717,15 @@ class GroupBibleGachaPlugin(Star):
             return
 
         try:
-            used, comps, meta = await self._draw(event, gid, source)
+            # 指定「精华」时绕过缓存强制拉取最新的群精华列表
+            used, comps, meta, reason = await self._draw(
+                event, gid, source, force=arg_has_essence,
+            )
         except Exception as e:  # noqa: BLE001
             logger.error(f"[群圣经] 抽卡失败：{traceback.format_exc() if self._cfg_bool('debug', False) else e}")
-            used, comps, meta = None, [], None
+            used, comps, meta, reason = None, [], None, "抽卡过程出错，请稍后再试"
         if used is None:
-            hint = "没抽到东西：群精华暂时拿不到或为空，圣经池也是空的。\n快用 /投稿 投喂一点圣经吧！"
-            if source == "essence":
-                hint = "没抽到：获取群精华失败或群精华还是空的。"
-            elif source == "pool":
-                hint = "没抽到：圣经池还是空的，快用 /投稿 投喂第一条圣经吧！"
-            yield event.plain_result(hint)
+            yield event.plain_result(f"没抽到：{reason}")
             return
         yield event.chain_result(self._render_draw(used, comps, meta))
 
@@ -1050,7 +1084,7 @@ class GroupBibleGachaPlugin(Star):
         text = (
             "📖 群圣经 · 指令一览\n"
             "─────────────\n"
-            "🎴 /抽卡 —— 从群精华/圣经池随机抽一条（/抽卡 精华、/抽卡 池 可指定来源）\n"
+            "🎴 /抽卡 —— 群精华+圣经池合并随机抽一条（/抽卡 精华、/抽卡 池 可指定来源）\n"
             "🙏 /投稿 文字 —— 投稿圣经（可带图片，直接入池）\n"
             "↩️ 回复一条消息发 /投稿 —— 把该消息投进圣经池\n"
             "📚 /圣经池 —— 查看本群圣经池概况\n"
@@ -1096,7 +1130,7 @@ class GroupBibleGachaPlugin(Star):
             comps: list = []
             if source != "text":
                 try:
-                    _, comps, _ = await self._draw(event, gid, source)
+                    _, comps, _, _ = await self._draw(event, gid, source)
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"[群圣经] 戳一戳抽卡失败：{e}")
             if comps:
